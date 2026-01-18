@@ -2,8 +2,8 @@ import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Proforma Builder",
-  description: "Build project and portfolio proformas (Jan–Dec) with weekly rollups."
+  title: "Xtillion Portfolio ProForma",
+  description: "Monthly portfolio and project proforma builder."
 };
 
 export default function RootLayout({
