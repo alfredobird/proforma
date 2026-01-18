@@ -6,18 +6,18 @@ type Project = {
   id: string;
   name: string;
   startDate: string; // yyyy-mm-dd
-  endDate: string;   // yyyy-mm-dd
+  endDate: string; // yyyy-mm-dd
   weeklyRevenue: number;
   weeklyCost: number;
   weeklyAdjustments: number;
 };
 
-type Week = {
-  index: number;         // 1..N
-  start: Date;           // local
-  end: Date;             // local (start + 6 days)
-  label: string;         // e.g., "Jan 01"
-  key: string;           // ISO-ish key for React
+type MonthBucket = {
+  monthIndex: number; // 0..11
+  start: Date; // noon
+  end: Date; // noon
+  label: string; // Jan, Feb...
+  key: string;
 };
 
 function uid() {
@@ -32,25 +32,13 @@ function toISODateInput(d: Date) {
 }
 
 function parseDateInput(value: string): Date | null {
-  // value expected yyyy-mm-dd
   if (!value) return null;
   const [y, m, d] = value.split("-").map((x) => Number(x));
   if (!y || !m || !d) return null;
   const dt = new Date(y, m - 1, d);
-  // guard: if browser coerced
   if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null;
-  // normalize time to noon to reduce DST edge cases
-  dt.setHours(12, 0, 0, 0);
+  dt.setHours(12, 0, 0, 0); // normalize to noon to reduce DST edge cases
   return dt;
-}
-
-function formatMoney(n: number) {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
-}
-
-function clampNumber(value: string, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
 }
 
 function startOfDayNoon(d: Date) {
@@ -59,59 +47,112 @@ function startOfDayNoon(d: Date) {
   return x;
 }
 
-function isOverlapping(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date) {
-  // inclusive overlap
-  return aStart <= bEnd && bStart <= aEnd;
+function clampNumber(value: string, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
 }
 
-function buildWeeksForYear(year: number): Week[] {
-  // Weeks are Jan 1 -> Dec 31 in 7-day buckets, starting on Jan 1 (per "Jan–Dec").
-  // This yields 53 weeks in some years depending on day-of-week and leap years.
-  const jan1 = startOfDayNoon(new Date(year, 0, 1));
-  const dec31 = startOfDayNoon(new Date(year, 11, 31));
-
-  const weeks: Week[] = [];
-  let current = new Date(jan1);
-  let index = 1;
-
-  while (current <= dec31) {
-    const start = startOfDayNoon(current);
-    const end = startOfDayNoon(new Date(start));
-    end.setDate(end.getDate() + 6);
-
-    const label = start.toLocaleDateString("en-US", { month: "short", day: "2-digit" });
-
-    weeks.push({
-      index,
-      start,
-      end,
-      label,
-      key: `${year}-w${index}-${start.getMonth() + 1}-${start.getDate()}`
-    });
-
-    current.setDate(current.getDate() + 7);
-    index += 1;
-  }
-
-  return weeks;
+function formatMoney(n: number) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
 }
 
-function computeProjectWeeklyMargin(p: Project) {
+function formatPct(n: number | null) {
+  if (n === null || !Number.isFinite(n)) return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "percent",
+    maximumFractionDigits: 1
+  }).format(n);
+}
+
+function computeWeeklyMargin(p: Project) {
   return p.weeklyRevenue - p.weeklyCost + p.weeklyAdjustments;
 }
 
-function isProjectActiveInWeek(p: Project, w: Week) {
-  const ps = parseDateInput(p.startDate);
-  const pe = parseDateInput(p.endDate);
-  if (!ps || !pe) return false;
-  const start = startOfDayNoon(ps);
-  const end = startOfDayNoon(pe);
-  return isOverlapping(start, end, w.start, w.end);
+/**
+ * Inclusive overlap in days between [aStart,aEnd] and [bStart,bEnd], both at noon.
+ */
+function overlapDaysInclusive(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date) {
+  const start = aStart > bStart ? aStart : bStart;
+  const end = aEnd < bEnd ? aEnd : bEnd;
+  if (start > end) return 0;
+
+  // difference in whole days, inclusive
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const diff = Math.round((end.getTime() - start.getTime()) / msPerDay);
+  return diff + 1;
+}
+
+function buildMonthsForYear(year: number): MonthBucket[] {
+  const months: MonthBucket[] = [];
+  for (let m = 0; m < 12; m++) {
+    const start = startOfDayNoon(new Date(year, m, 1));
+    const end = startOfDayNoon(new Date(year, m + 1, 0)); // last day of month
+    const label = start.toLocaleDateString("en-US", { month: "short" });
+    months.push({
+      monthIndex: m,
+      start,
+      end,
+      label,
+      key: `${year}-${m + 1}`
+    });
+  }
+  return months;
+}
+
+function clampProjectDatesToYear(p: Project, year: number): Project {
+  const yearStart = startOfDayNoon(new Date(year, 0, 1));
+  const yearEnd = startOfDayNoon(new Date(year, 11, 31));
+
+  const ps = parseDateInput(p.startDate) ?? yearStart;
+  const pe = parseDateInput(p.endDate) ?? yearEnd;
+
+  const clampedStart = ps < yearStart ? yearStart : ps > yearEnd ? yearEnd : ps;
+  const clampedEnd = pe < yearStart ? yearStart : pe > yearEnd ? yearEnd : pe;
+
+  const finalStart = clampedStart;
+  const finalEnd = clampedEnd < finalStart ? finalStart : clampedEnd;
+
+  return {
+    ...p,
+    startDate: toISODateInput(finalStart),
+    endDate: toISODateInput(finalEnd)
+  };
+}
+
+type Amounts = {
+  revenue: number;
+  cost: number;
+  adjustments: number;
+  margin: number;
+};
+
+function addAmounts(a: Amounts, b: Amounts): Amounts {
+  return {
+    revenue: a.revenue + b.revenue,
+    cost: a.cost + b.cost,
+    adjustments: a.adjustments + b.adjustments,
+    margin: a.margin + b.margin
+  };
+}
+
+function amountsFromWeekly(weeklyRevenue: number, weeklyCost: number, weeklyAdjustments: number, factorWeeks: number): Amounts {
+  const revenue = weeklyRevenue * factorWeeks;
+  const cost = weeklyCost * factorWeeks;
+  const adjustments = weeklyAdjustments * factorWeeks;
+  const margin = revenue - cost + adjustments;
+  return { revenue, cost, adjustments, margin };
+}
+
+function marginPct(revenue: number, margin: number): number | null {
+  if (!Number.isFinite(revenue) || revenue <= 0) return null;
+  return margin / revenue;
 }
 
 export default function Page() {
   const now = new Date();
   const [year, setYear] = useState<number>(now.getFullYear());
+
+  const months = useMemo(() => buildMonthsForYear(year), [year]);
 
   const defaultStart = useMemo(() => toISODateInput(new Date(year, 0, 1)), [year]);
   const defaultEnd = useMemo(() => toISODateInput(new Date(year, 11, 31)), [year]);
@@ -128,36 +169,15 @@ export default function Page() {
     }
   ]);
 
-  const weeks = useMemo(() => buildWeeksForYear(year), [year]);
-
-  // Ensure dates stay within the selected year if user switches year
+  // When year changes, keep project dates within that year (no crashes, no missing calc)
   React.useEffect(() => {
-    setProjects((prev) =>
-      prev.map((p) => {
-        const ps = parseDateInput(p.startDate);
-        const pe = parseDateInput(p.endDate);
-
-        const yearStart = startOfDayNoon(new Date(year, 0, 1));
-        const yearEnd = startOfDayNoon(new Date(year, 11, 31));
-
-        const newStart = ps ? ps : yearStart;
-        const newEnd = pe ? pe : yearEnd;
-
-        const clampedStart = newStart < yearStart ? yearStart : newStart > yearEnd ? yearEnd : newStart;
-        const clampedEnd = newEnd < yearStart ? yearStart : newEnd > yearEnd ? yearEnd : newEnd;
-
-        // If clamping causes start > end, set end = start
-        const finalStart = clampedStart;
-        const finalEnd = clampedEnd < finalStart ? finalStart : clampedEnd;
-
-        return {
-          ...p,
-          startDate: toISODateInput(finalStart),
-          endDate: toISODateInput(finalEnd)
-        };
-      })
-    );
+    setProjects((prev) => prev.map((p) => clampProjectDatesToYear(p, year)));
   }, [year]);
+
+  const yearOptions = useMemo(() => {
+    const y = now.getFullYear();
+    return [y - 1, y, y + 1, y + 2];
+  }, [now]);
 
   const addProject = () => {
     setProjects((prev) => {
@@ -185,53 +205,74 @@ export default function Page() {
     setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   };
 
-  const projectSummaries = useMemo(() => {
+  /**
+   * For each project and month:
+   * - compute overlapDays between project range and month
+   * - convert to "week factors" (overlapDays/7)
+   * - allocate weekly revenue/cost/adjustments to that month
+   */
+  const projectMonthGrid = useMemo(() => {
     return projects.map((p) => {
-      const weeklyMargin = computeProjectWeeklyMargin(p);
-      const projected = weeks.reduce((sum, w) => {
-        if (!isProjectActiveInWeek(p, w)) return sum;
-        return sum + weeklyMargin;
-      }, 0);
-
       const ps = parseDateInput(p.startDate);
       const pe = parseDateInput(p.endDate);
+
       const dateError =
         !ps || !pe ? "Start and end dates are required." : ps > pe ? "Start date must be on/before end date." : null;
 
+      const start = ps ? startOfDayNoon(ps) : null;
+      const end = pe ? startOfDayNoon(pe) : null;
+
+      const byMonth: Amounts[] = months.map((m) => {
+        if (!start || !end) return { revenue: 0, cost: 0, adjustments: 0, margin: 0 };
+        const days = overlapDaysInclusive(start, end, m.start, m.end);
+        if (days <= 0) return { revenue: 0, cost: 0, adjustments: 0, margin: 0 };
+        const factorWeeks = days / 7;
+        return amountsFromWeekly(p.weeklyRevenue, p.weeklyCost, p.weeklyAdjustments, factorWeeks);
+      });
+
+      const total = byMonth.reduce(
+        (acc, a) => addAmounts(acc, a),
+        { revenue: 0, cost: 0, adjustments: 0, margin: 0 }
+      );
+
+      const weeklyMargin = computeWeeklyMargin(p);
+      const weeklyPct = marginPct(p.weeklyRevenue, weeklyMargin);
+      const projectedPct = marginPct(total.revenue, total.margin);
+
       return {
-        id: p.id,
+        project: p,
+        dateError,
+        byMonth,
+        total,
         weeklyMargin,
-        projectedMargin: projected,
-        dateError
+        weeklyPct,
+        projectedPct
       };
     });
-  }, [projects, weeks]);
+  }, [projects, months]);
 
-  const portfolioWeekly = useMemo(() => {
-    return weeks.map((w) => {
-      const margin = projects.reduce((sum, p) => {
-        if (!isProjectActiveInWeek(p, w)) return sum;
-        return sum + computeProjectWeeklyMargin(p);
-      }, 0);
-      return { week: w, margin };
+  const portfolioByMonth = useMemo(() => {
+    const byMonth = months.map((_, mi) => {
+      return projectMonthGrid.reduce(
+        (acc, row) => addAmounts(acc, row.byMonth[mi]),
+        { revenue: 0, cost: 0, adjustments: 0, margin: 0 }
+      );
     });
-  }, [weeks, projects]);
 
-  const projectedPortfolioMargin = useMemo(() => {
-    return portfolioWeekly.reduce((sum, x) => sum + x.margin, 0);
-  }, [portfolioWeekly]);
+    const total = byMonth.reduce(
+      (acc, a) => addAmounts(acc, a),
+      { revenue: 0, cost: 0, adjustments: 0, margin: 0 }
+    );
 
-  const yearOptions = useMemo(() => {
-    const y = now.getFullYear();
-    return [y - 1, y, y + 1, y + 2];
-  }, [now]);
+    return { byMonth, total, projectedPct: marginPct(total.revenue, total.margin) };
+  }, [projectMonthGrid, months]);
 
   return (
-    <main className="mx-auto max-w-6xl px-4 py-10">
+    <main className="mx-auto max-w-7xl px-4 py-10">
       <header className="mb-8 flex flex-col gap-3">
         <h1 className="text-3xl font-semibold tracking-tight">Proforma Builder</h1>
         <p className="text-zinc-600">
-          Build project proformas and a portfolio rollup on a weekly calendar running January through December.
+          Monthly proforma (Jan–Dec). Enter weekly revenue/cost/adjustments per project; the app allocates them into months.
         </p>
 
         <div className="mt-2 flex flex-wrap items-end gap-3">
@@ -259,17 +300,21 @@ export default function Page() {
 
           <div className="ml-auto rounded-2xl border border-zinc-200 bg-white px-4 py-3 shadow-sm">
             <div className="text-xs uppercase tracking-wide text-zinc-500">Projected portfolio margin</div>
-            <div className="mt-1 text-2xl font-semibold">{formatMoney(projectedPortfolioMargin)}</div>
+            <div className="mt-1 text-2xl font-semibold">{formatMoney(portfolioByMonth.total.margin)}</div>
+            <div className="mt-1 text-xs text-zinc-600">
+              Margin %: <span className="font-medium">{formatPct(portfolioByMonth.projectedPct)}</span>
+            </div>
           </div>
         </div>
       </header>
 
+      {/* Projects */}
       <section className="mb-10">
         <h2 className="mb-3 text-lg font-semibold">Projects</h2>
 
         <div className="grid grid-cols-1 gap-4">
-          {projects.map((p, idx) => {
-            const summary = projectSummaries.find((s) => s.id === p.id)!;
+          {projectMonthGrid.map((row) => {
+            const p = row.project;
 
             return (
               <div key={p.id} className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm">
@@ -280,7 +325,7 @@ export default function Page() {
                       value={p.name}
                       onChange={(e) => updateProject(p.id, { name: e.target.value })}
                       className="w-[min(520px,90vw)] rounded-xl border border-zinc-200 px-3 py-2 text-sm"
-                      placeholder={`Project ${idx + 1} name`}
+                      placeholder="Project name"
                     />
                   </div>
 
@@ -318,17 +363,22 @@ export default function Page() {
                   </div>
 
                   <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-3">
-                    <div className="text-xs uppercase tracking-wide text-zinc-500">Projected project margin</div>
-                    <div className="mt-1 text-xl font-semibold">{formatMoney(summary.projectedMargin)}</div>
+                    <div className="text-xs uppercase tracking-wide text-zinc-500">Projected (year) margin</div>
+                    <div className="mt-1 text-xl font-semibold">{formatMoney(row.total.margin)}</div>
                     <div className="mt-1 text-xs text-zinc-600">
-                      Weekly margin: <span className="font-medium">{formatMoney(summary.weeklyMargin)}</span>
+                      Margin %: <span className="font-medium">{formatPct(row.projectedPct)}</span>
+                    </div>
+                    <div className="mt-1 text-xs text-zinc-600">
+                      Weekly margin:{" "}
+                      <span className="font-medium">{formatMoney(row.weeklyMargin)}</span>{" "}
+                      <span className="text-zinc-500">({formatPct(row.weeklyPct)})</span>
                     </div>
                   </div>
                 </div>
 
-                {summary.dateError ? (
+                {row.dateError ? (
                   <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                    {summary.dateError}
+                    {row.dateError}
                   </div>
                 ) : null}
 
@@ -370,52 +420,66 @@ export default function Page() {
         </div>
       </section>
 
+      {/* Monthly Table */}
       <section>
-        <div className="mb-3 flex items-end justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold">Portfolio weekly margin (Jan–Dec)</h2>
-            <p className="text-sm text-zinc-600">
-              Each row is a 7-day bucket starting on Jan 1 of the selected year.
-            </p>
-          </div>
-
-          <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 shadow-sm">
-            <div className="text-xs uppercase tracking-wide text-zinc-500">Weeks</div>
-            <div className="mt-1 text-lg font-semibold">{weeks.length}</div>
-          </div>
+        <div className="mb-3">
+          <h2 className="text-lg font-semibold">Monthly margin table (months as columns)</h2>
+          <p className="text-sm text-zinc-600">
+            Each cell shows <span className="font-medium">margin $</span> and <span className="font-medium">margin %</span>{" "}
+            (margin ÷ revenue). Months run January through December.
+          </p>
         </div>
 
         <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm">
-          <div className="max-h-[520px] overflow-auto">
-            <table className="w-full border-collapse text-sm">
+          <div className="overflow-auto">
+            <table className="min-w-[1100px] w-full border-collapse text-sm">
               <thead className="sticky top-0 bg-white shadow-[0_1px_0_0_rgba(0,0,0,0.06)]">
                 <tr className="text-left">
-                  <th className="w-24 px-4 py-3 font-semibold">Week</th>
-                  <th className="w-40 px-4 py-3 font-semibold">Start</th>
-                  <th className="w-40 px-4 py-3 font-semibold">End</th>
-                  <th className="px-4 py-3 font-semibold">Weekly portfolio margin</th>
+                  <th className="w-64 px-4 py-3 font-semibold">Project</th>
+                  {months.map((m) => (
+                    <th key={m.key} className="px-4 py-3 font-semibold">
+                      {m.label}
+                    </th>
+                  ))}
+                  <th className="px-4 py-3 font-semibold">Total</th>
                 </tr>
               </thead>
+
               <tbody>
-                {portfolioWeekly.map(({ week: w, margin }) => {
-                  const startStr = w.start.toLocaleDateString("en-US", { month: "short", day: "2-digit" });
-                  const endStr = w.end.toLocaleDateString("en-US", { month: "short", day: "2-digit" });
-                  return (
-                    <tr key={w.key} className="border-t border-zinc-100">
-                      <td className="px-4 py-3 text-zinc-600">{w.index}</td>
-                      <td className="px-4 py-3">{startStr}</td>
-                      <td className="px-4 py-3">{endStr}</td>
-                      <td className="px-4 py-3 font-medium">{formatMoney(margin)}</td>
-                    </tr>
-                  );
-                })}
+                {projectMonthGrid.map((row) => (
+                  <tr key={row.project.id} className="border-t border-zinc-100">
+                    <td className="px-4 py-3 font-medium">{row.project.name}</td>
+
+                    {row.byMonth.map((a, idx) => (
+                      <td key={idx} className="px-4 py-3">
+                        <div className="font-medium">{formatMoney(a.margin)}</div>
+                        <div className="text-xs text-zinc-500">{formatPct(marginPct(a.revenue, a.margin))}</div>
+                      </td>
+                    ))}
+
+                    <td className="px-4 py-3">
+                      <div className="font-semibold">{formatMoney(row.total.margin)}</div>
+                      <div className="text-xs text-zinc-600">{formatPct(row.projectedPct)}</div>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
+
               <tfoot>
                 <tr className="border-t border-zinc-200 bg-zinc-50">
-                  <td className="px-4 py-3 font-semibold" colSpan={3}>
-                    Projected portfolio margin
+                  <td className="px-4 py-3 font-semibold">Portfolio</td>
+
+                  {portfolioByMonth.byMonth.map((a, idx) => (
+                    <td key={idx} className="px-4 py-3">
+                      <div className="font-semibold">{formatMoney(a.margin)}</div>
+                      <div className="text-xs text-zinc-600">{formatPct(marginPct(a.revenue, a.margin))}</div>
+                    </td>
+                  ))}
+
+                  <td className="px-4 py-3">
+                    <div className="text-base font-bold">{formatMoney(portfolioByMonth.total.margin)}</div>
+                    <div className="text-xs text-zinc-700">{formatPct(portfolioByMonth.projectedPct)}</div>
                   </td>
-                  <td className="px-4 py-3 text-base font-semibold">{formatMoney(projectedPortfolioMargin)}</td>
                 </tr>
               </tfoot>
             </table>
@@ -423,20 +487,9 @@ export default function Page() {
         </div>
 
         <div className="mt-4 text-xs text-zinc-500">
-          Note: A project contributes its weekly values to any week bucket that overlaps the project’s date range.
+          Allocation note: weekly values are distributed into months by overlapping days (monthly amount = weekly × overlapDays/7).
         </div>
       </section>
-
-      <footer className="mt-12 border-t border-zinc-200 pt-6 text-sm text-zinc-600">
-        <div className="flex flex-col gap-1">
-          <div className="font-medium text-zinc-800">Next improvements you might want</div>
-          <ul className="list-disc pl-5">
-            <li>Portfolios (named groupings) and filtering by portfolio</li>
-            <li>CSV export, PDF export, and saving to browser (localStorage)</li>
-            <li>Different revenue/cost schedules (monthly, ramp, one-time fees)</li>
-          </ul>
-        </div>
-      </footer>
     </main>
   );
 }
